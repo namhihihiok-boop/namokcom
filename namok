@@ -1,0 +1,194 @@
+-- ============================================================================
+-- NGUYEN PHUONG NAM — HITBOX 50 + ESP LINE (DeltaX Optimized)
+-- Tự động kiểm tra & dự phòng cho môi trường DeltaX
+-- ============================================================================
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+-- Cập nhật camera khi có thay đổi (quan trọng trên mobile)
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = workspace.CurrentCamera
+end)
+
+-- ⚙️ CẤU HÌNH
+local HITBOX_SIZE    = 50
+local TEAM_CHECK     = true
+local UPDATE_RATE    = 0.1
+local HIT_PARTS      = {"Head", "UpperTorso", "LowerTorso", "Torso", "HumanoidRootPart"}
+
+local ESP_LINE_ENABLED = true
+local ESP_LINE_COLOR   = Color3.fromRGB(120, 180, 255)
+local ESP_LINE_THICK   = 1.5
+local ESP_LINE_ORIGIN  = "Top"
+local ESP_MAX_DIST     = 1500
+
+-- ============================ KIỂM TRA TƯƠNG THÍCH ============================
+-- Kiểm tra sự tồn tại của các hàm quan trọng trước khi dùng
+local function isSupported(fnName)
+    return type(_G[fnName]) == "function" or type(getfenv()[fnName]) == "function"
+end
+
+if not isSupported("Drawing") or not Drawing.new then
+    warn("[NPN] CẢNH BÁO: Drawing API không khả dụng. Chức năng ESP Line sẽ bị tắt.")
+    ESP_LINE_ENABLED = false
+end
+
+-- ============================ HITBOX ============================
+local Originals = {}
+
+local function shouldSkip(player)
+    if player == LocalPlayer then return true end
+    -- Kiểm tra Team an toàn (tránh lỗi nếu game không có Team)
+    if TEAM_CHECK and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then
+        return true
+    end
+    return false
+end
+
+local function expandHitbox(char)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    for _, name in ipairs(HIT_PARTS) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            if not Originals[part] then Originals[part] = part.Size end
+            -- Dùng pcall để tránh lỗi nếu game chặn thay đổi thuộc tính
+            pcall(function()
+                part.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+            end)
+        end
+    end
+end
+
+local function restoreAll()
+    for part, size in pairs(Originals) do
+        if part and part.Parent then
+            pcall(function() part.Size = size end)
+        end
+    end
+    table.clear(Originals)
+end
+
+local function processPlayer(player)
+    if shouldSkip(player) then return end
+    if player.Character then expandHitbox(player.Character) end
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.5) -- Chờ character load xong
+        if not shouldSkip(player) then expandHitbox(char) end
+    end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do processPlayer(p) end
+Players.PlayerAdded:Connect(processPlayer)
+
+task.spawn(function()
+    while true do
+        task.wait(UPDATE_RATE)
+        for _, p in ipairs(Players:GetPlayers()) do
+            if not shouldSkip(p) and p.Character then expandHitbox(p.Character) end
+        end
+    end
+end)
+
+-- ============================ ESP LINE (DeltaX Safe Mode) ============================
+local ESPCache = {}
+
+local function makeLine()
+    -- Kiểm tra kỹ trước khi tạo Drawing object
+    local ok, o = pcall(function() return Drawing.new("Line") end)
+    if not ok or not o then return nil end
+    o.Thickness   = ESP_LINE_THICK
+    o.Color       = ESP_LINE_COLOR
+    o.Transparency= 1
+    o.Visible     = false
+    pcall(function() o.ZIndex = 9999 end) -- Một số executor không hỗ trợ ZIndex
+    return o
+end
+
+local function getOrigin()
+    local vp = Camera.ViewportSize
+    if ESP_LINE_ORIGIN == "Top" then
+        return Vector2.new(vp.X * 0.5, 0)
+    elseif ESP_LINE_ORIGIN == "Bottom" then
+        return Vector2.new(vp.X * 0.5, vp.Y)
+    elseif ESP_LINE_ORIGIN == "Center" then
+        return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+    elseif ESP_LINE_ORIGIN == "Player" then
+        local myChar = LocalPlayer.Character
+        if myChar then
+            local hrp = myChar:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local sp, on = Camera:WorldToViewportPoint(hrp.Position)
+                if on and sp.Z > 0 then
+                    return Vector2.new(sp.X, sp.Y)
+                end
+            end
+        end
+        return Vector2.new(vp.X * 0.5, vp.Y)
+    end
+    return Vector2.new(vp.X * 0.5, 0)
+end
+
+local function updateESPLine()
+    if not ESP_LINE_ENABLED then return end
+
+    local camPos = Camera.CFrame.Position
+    local alive  = {}
+    local origin = getOrigin()
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if not shouldSkip(player) and player.Character then
+            local char = player.Character
+            local hum  = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local dist = (camPos - hrp.Position).Magnitude
+                    if dist <= ESP_MAX_DIST then
+                        alive[player.UserId] = true
+                        local e = ESPCache[player.UserId]
+                        if not e then
+                            local line = makeLine()
+                            if line then
+                                e = { line = line }
+                                ESPCache[player.UserId] = e
+                            end
+                        end
+                        if e and e.line then
+                            local headPos = hrp.Position + Vector3.new(0, 3, 0)
+                            local sp, on = Camera:WorldToViewportPoint(headPos)
+                            if on and sp.Z > 0 then
+                                e.line.From    = origin
+                                e.line.To      = Vector2.new(sp.X, sp.Y)
+                                e.line.Color   = ESP_LINE_COLOR
+                                e.line.Thickness = ESP_LINE_THICK
+                                e.line.Visible = true
+                            else
+                                e.line.Visible = false
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Dọn dẹp line của người chơi đã rời đi hoặc chết
+    for uid, e in pairs(ESPCache) do
+        if not alive[uid] then
+            if e.line then pcall(function() e.line:Remove() end) end
+            ESPCache[uid] = nil
+        end
+    end
+end
+
+-- ============================ MAIN LOOP ============================
+-- RenderStepped có thể không ổn định trên một số executor mobile, dùng pcall để bọc
+RunService.RenderStepped:Connect(function()
+    pcall(updateESPLine)
+end)
+
+print("[NPN] Hitbox 50 + ESP Line (DeltaX Optimized) ON")
